@@ -153,10 +153,12 @@ class Generator
         $routeGroup = $this->getRouteGroup($controller, $method);
         $docBlock = $this->parseDocBlock($method);
         
+        $description = "Controller Action: `{$controller->getName()}::{$method->getName()}()`" . PHP_EOL . PHP_EOL;
+        
         if ($requestClass = $this->getFormRequestClassFromMethod($method)) {
             $className = get_class($requestClass);
             $bodyParameters = $this->getBodyParametersFromFormRequestClass($requestClass);
-            $description = "Request class: `$className`" . PHP_EOL . PHP_EOL . "Controller Action: `{$controller->getName()}::{$method->getName()}()`";
+            $description .= "Request class: `$className`" . PHP_EOL . PHP_EOL;
         } else {
             $bodyParameters = $this->getBodyParametersFromDocBlock($docBlock['tags']);
         }
@@ -172,7 +174,7 @@ class Generator
             'id' => md5($this->getUri($route).':'.implode($this->getMethods($route))),
             'group' => $routeGroup,
             'title' => $docBlock['short'],
-            'description' => $description ?? $docBlock['long'],
+            'description' => $description . $docBlock['long'],
             'methods' => $this->getMethods($route),
             'uri' => $this->getUri($route),
             'bodyParameters' => $bodyParameters,
