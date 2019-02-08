@@ -1,5 +1,4 @@
 <?php
-
 namespace Mpociot\ApiDoc\Tools;
 
 use Faker\Factory;
@@ -8,10 +7,13 @@ use ReflectionMethod;
 use Illuminate\Routing\Route;
 use Mpociot\Reflection\DocBlock;
 use Mpociot\Reflection\DocBlock\Tag;
+use Mpociot\ApiDoc\Tools\Traits\ParamHelpers;
 use TwoHands\System\BaseFormRequest;
 
 class Generator
 {
+    use ParamHelpers;
+    
     /**
      * @param Route $route
      *
@@ -69,13 +71,13 @@ class Generator
         $bodyParams = [];
         
         foreach ($rules as $fieldName => $fieldRules) {
-            $bodyParams[$fieldName] = $this->parseFormRequestFieldRules($fieldName, $fieldRules);
+            $bodyParams[$fieldName] = $this->parseFormRequestFieldRules($fieldRules);
         }
         
         return $bodyParams;
     }
     
-    private function parseFormRequestFieldRules($name, $rules): array
+    private function parseFormRequestFieldRules($rules): array
     {
         if (is_string($rules)) {
             $rules = explode('|', $rules);
@@ -147,12 +149,6 @@ class Generator
         list($class, $method) = explode('@', $routeAction['uses']);
         $controller = new ReflectionClass($class);
         $method = $controller->getMethod($method);
-
-//        echo "  {$controller->getName()}::{$method->getName()}" . PHP_EOL;
-//        foreach ($method->getParameters() as $param) {
-//            echo "    - $" . $param->getName() . ': ' . $param->getType() . PHP_EOL;
-//        }
-//        echo PHP_EOL;
         
         $routeGroup = $this->getRouteGroup($controller, $method);
         $docBlock = $this->parseDocBlock($method);
@@ -160,7 +156,7 @@ class Generator
         if ($requestClass = $this->getFormRequestClassFromMethod($method)) {
             $className = get_class($requestClass);
             $bodyParameters = $this->getBodyParametersFromFormRequestClass($requestClass);
-            $methodName = "Request class: `$className`" . PHP_EOL . PHP_EOL . "Controller Action: `{$controller->getName()}::{$method->getName()}()`";
+            $description = "Request class: `$className`" . PHP_EOL . PHP_EOL . "Controller Action: `{$controller->getName()}::{$method->getName()}()`";
         } else {
             $bodyParameters = $this->getBodyParametersFromDocBlock($docBlock['tags']);
         }
@@ -176,10 +172,11 @@ class Generator
             'id' => md5($this->getUri($route).':'.implode($this->getMethods($route))),
             'group' => $routeGroup,
             'title' => $docBlock['short'],
-            'description' => $methodName ?? $docBlock['long'],
+            'description' => $description ?? $docBlock['long'],
             'methods' => $this->getMethods($route),
             'uri' => $this->getUri($route),
             'bodyParameters' => $bodyParameters,
+            'cleanBodyParameters' => $this->cleanParams($bodyParameters),
             'queryParameters' => $queryParameters,
             'authenticated' => $this->getAuthStatusFromDocBlock($docBlock['tags']),
             'response' => $content,
@@ -364,10 +361,10 @@ class Generator
                 return str_random();
             },
             'array' => function () {
-                return '[]';
+                return [];
             },
             'object' => function () {
-                return '{}';
+                return new \stdClass;
             },
         ];
         
