@@ -8,12 +8,10 @@ use ReflectionMethod;
 use Illuminate\Routing\Route;
 use Mpociot\Reflection\DocBlock;
 use Mpociot\Reflection\DocBlock\Tag;
-use Mpociot\ApiDoc\Tools\Traits\ParamHelpers;
+use TwoHands\System\BaseFormRequest;
 
 class Generator
 {
-    use ParamHelpers;
-
     /**
      * @param Route $route
      *
@@ -23,7 +21,7 @@ class Generator
     {
         return $route->uri();
     }
-
+    
     /**
      * @param Route $route
      *
@@ -33,7 +31,110 @@ class Generator
     {
         return array_diff($route->methods(), ['HEAD']);
     }
-
+    
+    /**
+     * @param ReflectionMethod $method
+     * @return ReflectionClass|null
+     */
+    private function getFormRequestClassFromMethod(ReflectionMethod $method): ?BaseFormRequest
+    {
+        foreach ($method->getParameters() as $param) {
+            if (! $typehintedClass = $param->getClass()) {
+                continue;
+            }
+            
+            if ($typehintedClass->isSubclassOf(BaseFormRequest::class)) {
+                return $typehintedClass->newInstanceWithoutConstructor();
+            }
+        }
+        
+        return null;
+    }
+    
+    private function getBodyParametersFromFormRequestClass(BaseFormRequest $formRequest): array
+    {
+        try {
+            $rules = $formRequest->rules();
+        } catch (\Exception $e) {
+            return [
+                'error' => [
+                    'type' => 'string',
+                    'description' => 'Could not generate documentation for this endpoint: ' . $e->getMessage(),
+                    'required' => false,
+                    'value' => '',
+                ]
+            ];
+        }
+        
+        $bodyParams = [];
+        
+        foreach ($rules as $fieldName => $fieldRules) {
+            $bodyParams[$fieldName] = $this->parseFormRequestFieldRules($fieldName, $fieldRules);
+        }
+        
+        return $bodyParams;
+    }
+    
+    private function parseFormRequestFieldRules($name, $rules): array
+    {
+        if (is_string($rules)) {
+            $rules = explode('|', $rules);
+        }
+        
+        $parsed = [
+            'type' => null,
+            'description' => '-',
+            'required' => false,
+            'value' => '',
+        ];
+        
+        foreach ($rules as $rule) {
+            $matches = [];
+            
+            if (! is_string($rule)) {
+                continue; // we won't handle callbacks for now
+            }
+            
+            if ($rule === 'string' || $rule === 'array') {
+                $parsed['type'] = $rule;
+                continue;
+            }
+            
+            if ($rule === 'required') {
+                $parsed['required'] = true;
+                continue;
+            }
+            
+            if ($rule === 'email') {
+                $parsed['type'] = 'string';
+                $parsed['description'] = 'Must be a valid email address';
+                continue;
+            }
+            
+            if (preg_match('/^unique:/', $rule, $matches)) {
+                $parsed['description'] = 'Must be unique in the database. ';
+                continue;
+            }
+            
+            if (preg_match('/^min:([0-9]+)$/', $rule, $matches)) {
+                $parsed['description'] = 'Minimum ' . $matches[1] . ' characters. ';
+                continue;
+            }
+            
+            if (preg_match('/^max:([0-9]+)$/', $rule, $matches)) {
+                $parsed['description'] = 'Maximum ' . $matches[1] . ' characters. ';
+                continue;
+            }
+            
+            if (preg_match('/^in:(.+)/', $rule, $matches)) {
+                $parsed['description'] = 'Must be one of: ' . str_replace(',', ', ', $matches[1]);
+                continue;
+            }
+        }
+        
+        return $parsed;
+    }
+    
     /**
      * @param  \Illuminate\Routing\Route $route
      * @param array $apply Rules to apply when generating documentation for this route
@@ -47,35 +148,48 @@ class Generator
         $controller = new ReflectionClass($class);
         $method = $controller->getMethod($method);
 
+//        echo "  {$controller->getName()}::{$method->getName()}" . PHP_EOL;
+//        foreach ($method->getParameters() as $param) {
+//            echo "    - $" . $param->getName() . ': ' . $param->getType() . PHP_EOL;
+//        }
+//        echo PHP_EOL;
+        
         $routeGroup = $this->getRouteGroup($controller, $method);
         $docBlock = $this->parseDocBlock($method);
-        $bodyParameters = $this->getBodyParametersFromDocBlock($docBlock['tags']);
+        
+        if ($requestClass = $this->getFormRequestClassFromMethod($method)) {
+            $className = get_class($requestClass);
+            $bodyParameters = $this->getBodyParametersFromFormRequestClass($requestClass);
+            $methodName = "Request class: `$className`" . PHP_EOL . PHP_EOL . "Controller Action: `{$controller->getName()}::{$method->getName()}()`";
+        } else {
+            $bodyParameters = $this->getBodyParametersFromDocBlock($docBlock['tags']);
+        }
+        
         $queryParameters = $this->getQueryParametersFromDocBlock($docBlock['tags']);
         $content = ResponseResolver::getResponse($route, $docBlock['tags'], [
             'rules' => $rulesToApply,
             'body' => $bodyParameters,
             'query' => $queryParameters,
         ]);
-
+        
         $parsedRoute = [
             'id' => md5($this->getUri($route).':'.implode($this->getMethods($route))),
             'group' => $routeGroup,
             'title' => $docBlock['short'],
-            'description' => $docBlock['long'],
+            'description' => $methodName ?? $docBlock['long'],
             'methods' => $this->getMethods($route),
             'uri' => $this->getUri($route),
             'bodyParameters' => $bodyParameters,
-            'cleanBodyParameters' => $this->cleanParams($bodyParameters),
             'queryParameters' => $queryParameters,
             'authenticated' => $this->getAuthStatusFromDocBlock($docBlock['tags']),
             'response' => $content,
             'showresponse' => ! empty($content),
         ];
         $parsedRoute['headers'] = $rulesToApply['headers'] ?? [];
-
+        
         return $parsedRoute;
     }
-
+    
     /**
      * @param array $tags
      *
@@ -103,17 +217,17 @@ class Generator
                     }
                     $required = trim($required) == 'required' ? true : false;
                 }
-
+                
                 $type = $this->normalizeParameterType($type);
                 list($description, $example) = $this->parseDescription($description, $type);
                 $value = is_null($example) ? $this->generateDummyValue($type) : $example;
-
+                
                 return [$name => compact('type', 'description', 'required', 'value')];
             })->toArray();
-
+        
         return $parameters;
     }
-
+    
     /**
      * @param array $tags
      *
@@ -141,20 +255,20 @@ class Generator
                     }
                     $required = trim($required) == 'required' ? true : false;
                 }
-
+                
                 list($description, $value) = $this->parseDescription($description, 'string');
                 if (is_null($value)) {
                     $value = str_contains($description, ['number', 'count', 'page'])
                         ? $this->generateDummyValue('integer')
                         : $this->generateDummyValue('string');
                 }
-
+                
                 return [$name => compact('description', 'required', 'value')];
             })->toArray();
-
+        
         return $parameters;
     }
-
+    
     /**
      * @param array $tags
      *
@@ -166,10 +280,10 @@ class Generator
             ->first(function ($tag) {
                 return $tag instanceof Tag && strtolower($tag->getName()) === 'authenticated';
             });
-
+        
         return (bool) $authTag;
     }
-
+    
     /**
      * @param ReflectionMethod $method
      *
@@ -179,14 +293,14 @@ class Generator
     {
         $comment = $method->getDocComment();
         $phpdoc = new DocBlock($comment);
-
+        
         return [
             'short' => $phpdoc->getShortDescription(),
             'long' => $phpdoc->getLongDescription()->getContents(),
             'tags' => $phpdoc->getTags(),
         ];
     }
-
+    
     /**
      * @param ReflectionClass $controller
      * @param ReflectionMethod $method
@@ -205,7 +319,7 @@ class Generator
                 }
             }
         }
-
+        
         $docBlockComment = $controller->getDocComment();
         if ($docBlockComment) {
             $phpdoc = new DocBlock($docBlockComment);
@@ -215,10 +329,10 @@ class Generator
                 }
             }
         }
-
+        
         return 'general';
     }
-
+    
     private function normalizeParameterType($type)
     {
         $typeMap = [
@@ -226,10 +340,10 @@ class Generator
             'bool' => 'boolean',
             'double' => 'float',
         ];
-
+        
         return $type ? ($typeMap[$type] ?? $type) : 'string';
     }
-
+    
     private function generateDummyValue(string $type)
     {
         $faker = Factory::create();
@@ -250,18 +364,18 @@ class Generator
                 return str_random();
             },
             'array' => function () {
-                return [];
+                return '[]';
             },
             'object' => function () {
-                return new \stdClass;
+                return '{}';
             },
         ];
-
+        
         $fake = $fakes[$type] ?? $fakes['string'];
-
+        
         return $fake();
     }
-
+    
     /**
      * Allows users to specify an example for the parameter by writing 'Example: the-example',
      * to be used in example requests and response calls.
@@ -276,14 +390,14 @@ class Generator
         $example = null;
         if (preg_match('/(.*)\s+Example:\s*(.*)\s*/', $description, $content)) {
             $description = $content[1];
-
+            
             // examples are parsed as strings by default, we need to cast them properly
             $example = $this->castToType($content[2], $type);
         }
-
+        
         return [$description, $example];
     }
-
+    
     /**
      * Cast a value from a string to a specified type.
      *
@@ -300,17 +414,17 @@ class Generator
             'float' => 'floatval',
             'boolean' => 'boolval',
         ];
-
+        
         // First, we handle booleans. We can't use a regular cast,
         //because PHP considers string 'false' as true.
         if ($value == 'false' && $type == 'boolean') {
             return false;
         }
-
+        
         if (isset($casts[$type])) {
             return $casts[$type]($value);
         }
-
+        
         return $value;
     }
 }
